@@ -151,7 +151,7 @@
     };
     Store.lookupCode = async (code) => {
       if (!/^[A-Z0-9]{4,10}$/.test(code)) return null;
-      try { const s = await F.getDoc(ref('codes/' + code)); return s.exists() ? s.data() : null; } catch (e) { return null; }
+      try { const s = await F.getDoc(ref('codes/' + code)); return s.exists() ? s.data() : null; } catch (e) { return { error: errText(e) }; }
     };
     Store.setMember = (m) => F.setDoc(ref('members/' + Store.uid), Object.assign({}, m, { at: Date.now() }));
     Store.setDeals = (deals) => F.setDoc(ref('ap/deals'), { deals, at: Date.now() }).catch(writeErr);
@@ -991,7 +991,10 @@
       const hit = await Store.lookupCode(v);
       PUI.busy = false;
       if (el) el.disabled = false;
-      if (!hit || hit.gameId !== g.id) { if (errEl) errEl.textContent = 'コードを確かめてください。'; return; }
+      const msg = hit && hit.error ? '通信できませんでした。電波を確かめて、もう一度押してください(' + hit.error + ')。'
+        : !hit ? 'このコードは見つかりません。座席札の6文字を確かめてください。'
+        : hit.gameId !== g.id ? 'このコードは前のゲームのものです。今の座席札のコードを入れてください。' : '';
+      if (msg) { if (errEl) errEl.textContent = msg; return; }
       PUI.joinSeat = hit.seat;
       PUI.joinCode = v;
       render(true);
