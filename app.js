@@ -7,6 +7,8 @@
   const C = E.CONFIG;
   const SEATS = E.SEATS;
   const SDK = 'https://www.gstatic.com/firebasejs/10.12.2/';
+  /* この版の印。公開するたびに version.json と一緒に上げる */
+  const BUILD = '8';
   const app = document.getElementById('app');
   /* 時刻はサーバーの時計にそろえる(共有のとき、起動時と5分ごとに差を測る) */
   let clockOffset = 0;
@@ -520,6 +522,18 @@
     if (Store.pendingSince && Date.now() - Store.pendingSince > 8000) return '保存がまだ届いていません。回線を確かめてください。直らなければページを開き直してください。';
     return '';
   }
+  /* 新しい版が出たら、GMと会場画面に知らせる(プレイヤーは開き直したときに新しい版になる) */
+  let newBuild = false;
+  async function checkBuild() {
+    if (document.hidden || newBuild) return;
+    try {
+      const v = await (await fetch('version.json?t=' + Date.now(), { cache: 'no-store' })).json();
+      if (v && v.build && String(v.build) !== BUILD) { newBuild = true; Store.emit(); }
+    } catch (e) { /* 取れなければ次に */ }
+  }
+  setInterval(checkBuild, 60 * 1000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkBuild(); });
+  setTimeout(checkBuild, 5000);
   let lastBad = '';
   setInterval(() => { const b = syncBadText(); if (b !== lastBad) { lastBad = b; Store.emit(); } }, 2000);
   function scheduleRender() { if (rafId) return; rafId = requestAnimationFrame(() => { rafId = 0; render(false); }); }
@@ -537,6 +551,7 @@
     else html = homeHtml();
     const bad = syncBadText();
     if (bad) { html = '<div class="sync-bad" role="alert"><span>' + esc(bad) + '</span><button class="btn btn-small" data-act="reload">開き直す</button></div>' + html; if (sig !== null) sig += '|bad'; }
+    if (newBuild && (v === 'gm' || v === 'display')) html = '<div class="update-note" role="status"><span>新しい版が出ています。</span><button class="btn btn-small" data-act="reload">読み直す</button></div>' + html;
     if (!force && v === lastView && typing) {
       if (v === 'play' && sig === lastSig) return;
       if (v !== 'play') { pending = true; return; }
