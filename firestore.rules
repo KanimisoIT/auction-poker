@@ -1,0 +1,60 @@
+rules_version = '2';
+// THE AUCTION POKER 運営アプリの Firestore のルール。
+// GMのメールアドレスを書き換えてから、Firebase のコンソールの「Firestore Database → ルール」に貼って公開する。
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isGM() {
+      return signedIn() && request.auth.token.email_verified == true
+        && request.auth.token.email in ['GMのメールアドレス'];
+    }
+    function game() { return get(/databases/$(database)/documents/ap/game).data; }
+    function hasMember() { return exists(/databases/$(database)/documents/members/$(request.auth.uid)); }
+    function member() { return get(/databases/$(database)/documents/members/$(request.auth.uid)).data; }
+    function ownsSeat(d) {
+      return signedIn() && d.uid == request.auth.uid && hasMember()
+        && member().gameId == d.gameId && member().seat == d.seat;
+    }
+    function idOk(id, d) { return id == d.gameId + '_R' + string(d.round) + '_' + d.seat; }
+    function current(d, phase) {
+      return game().phase == phase && d.gameId == game().id && d.round == game().round;
+    }
+
+    // 進行の状態(公開の写し)と、提出・入札の数は、参加している端末が読む。書くのはGMだけ
+    match /ap/game { allow read: if signedIn(); }
+    match /ap/progress { allow read: if signedIn(); }
+    // ap/gm(全部の状態)・ap/deals(配札表)ほかはGMだけ
+    match /ap/{docId} { allow read, write: if isGM(); }
+
+    // 参加コード: コードを知っている端末だけが一件ずつ引ける。一覧は引けない
+    match /codes/{code} {
+      allow get: if signedIn();
+      allow list, write: if isGM();
+    }
+    // 席に入った印: 本人がコードで入る
+    match /members/{uid} {
+      allow read: if isGM() || (signedIn() && request.auth.uid == uid);
+      allow create, update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.gameId == game().id
+        && get(/databases/$(database)/documents/codes/$(request.resource.data.code)).data.seat == request.resource.data.seat
+        && get(/databases/$(database)/documents/codes/$(request.resource.data.code)).data.gameId == request.resource.data.gameId;
+      allow delete: if isGM() || (signedIn() && request.auth.uid == uid);
+    }
+    // カードの提出: 自分の席の分だけ、提出の段のあいだだけ。読めるのはGMと本人
+    match /entries/{id} {
+      allow read: if isGM() || (signedIn() && (resource == null || resource.data.uid == request.auth.uid));
+      allow create, update: if isGM()
+        || (ownsSeat(request.resource.data) && idOk(id, request.resource.data) && current(request.resource.data, 'ENTRY'));
+      allow delete: if isGM();
+    }
+    // 入札: 自分の席の分を、オークションの段のあいだに一度だけ。読めるのはGMと本人
+    match /bids/{id} {
+      allow read: if isGM() || (signedIn() && (resource == null || resource.data.uid == request.auth.uid));
+      allow create: if isGM()
+        || (ownsSeat(request.resource.data) && idOk(id, request.resource.data) && current(request.resource.data, 'AUCTION'));
+      allow update, delete: if isGM();
+    }
+    // 時計合わせ: 自分の印に、サーバーの時刻を書いて読む
+    match /pings/{uid} { allow read, write: if signedIn() && request.auth.uid == uid; }
+  }
+}
