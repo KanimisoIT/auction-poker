@@ -8,7 +8,7 @@
   const SEATS = E.SEATS;
   const SDK = 'https://www.gstatic.com/firebasejs/10.12.2/';
   /* この版の印。公開するたびに version.json と一緒に上げる */
-  const BUILD = '9';
+  const BUILD = '10';
   const app = document.getElementById('app');
   /* 時刻はサーバーの時計にそろえる(共有のとき、起動時と5分ごとに差を測る) */
   let clockOffset = 0;
@@ -602,8 +602,8 @@
   }
 
   /* ================= プレイヤー ================= */
-  /* 入札は役名も金額も自由記入。行は最初に3つ、足せるのは12まで */
-  const BID_ROWS0 = 3, BID_ROWS_MAX = 12;
+  /* 入札は役名も金額も自由記入。行は最初に3つ、足せるのは10まで */
+  const BID_ROWS0 = 3, BID_ROWS_MAX = 10;
   const blankBidRows = (n) => Array.from({ length: n }, () => ({ text: '', amount: '' }));
   /* 送った入札・確かめる入札の行(書いたとおりに出す。役として読めたかは見せない) */
   function bidLines(b) {
