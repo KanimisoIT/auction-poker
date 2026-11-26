@@ -185,8 +185,19 @@
     }
     setInterval(syncClock, 5 * 60 * 1000);
   }
+  /* config.js の設定を読む。Firebase のコンソールの断片を丸ごと貼った(import の行がある)ときも、文字から設定を拾う */
+  async function loadConfig() {
+    if (typeof firebaseConfig !== 'undefined' && firebaseConfig) return firebaseConfig;   // config.js が置く
+    try {
+      const t = await (await fetch('config.js?t=' + Date.now(), { cache: 'no-store' })).text();
+      const m = t.match(/firebaseConfig\s*=\s*(\{[\s\S]*?\})/);
+      if (!m) return null;
+      const v = new Function('return (' + m[1] + ');')();
+      return v && v.apiKey && v.projectId ? v : null;
+    } catch (e) { return null; }
+  }
   async function initStore() {
-    const cfg = typeof firebaseConfig !== 'undefined' ? firebaseConfig : null;   // config.js が置く
+    const cfg = await loadConfig();
     const pref = ls.get('ap.mode');
     Store.hasConfig = !!cfg;
     if (cfg && pref !== 'local') {
