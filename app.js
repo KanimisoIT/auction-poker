@@ -923,9 +923,9 @@
     return '<div class="stack"><p><b>' + esc(C.version) + '</b><br><small>' + esc(C.note) + '</small></p><p class="eyebrow">順位ボーナス</p><div class="tbl-wrap">' + rb + '</div><p class="eyebrow">役ボーナス(1パターンあたり)</p><div class="tbl-wrap">' + ro + '</div>' + deal + '</div>';
   }
   function newGameHtml() {
-    return '<p class="eyebrow" style="margin-top:8px">新しいゲームを作る</p><div class="row"><span class="seg" role="group" aria-label="新しいゲームの種類"><button data-act="gmode" data-v="test" aria-pressed="' + (GUI.mode === 'test') + '">TEST</button><button data-act="gmode" data-v="live" aria-pressed="' + (GUI.mode === 'live') + '">本番</button></span>' +
+    return '<p class="eyebrow" style="margin-top:8px">リセット(新しいゲームを作る)</p><div class="row"><span class="seg" role="group" aria-label="新しいゲームの種類"><button data-act="gmode" data-v="test" aria-pressed="' + (GUI.mode === 'test') + '">TEST</button><button data-act="gmode" data-v="live" aria-pressed="' + (GUI.mode === 'live') + '">本番</button></span>' +
       (GUI.mode === 'test' ? '<label class="row"><input type="checkbox" id="fast" data-act="gfast"' + (GUI.fast ? ' checked' : '') + '> <span>時計を1/10</span></label>' : '') +
-      armBtn('reset', (GUI.mode === 'live' ? '本番' : 'TEST') + 'のゲームを新しく作る', 'btn-danger') + '</div><small class="quiet">参加コードも作り直しになります。今のゲームは残りません。</small>';
+      armBtn('reset', 'リセットして' + (GUI.mode === 'live' ? '本番' : 'TEST') + 'のゲームを作る', 'btn-danger') + '</div><small class="quiet">今のゲームを消して、参加コードも作り直し、受付から始めます。押し間違えないよう、二度押しです。</small>';
   }
   function opsHtml(g) {
     const timed = g.phase === 'FREE' || g.phase === 'AUCTION';
