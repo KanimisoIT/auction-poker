@@ -203,3 +203,7 @@ td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
 .readout .amt { font-family: var(--f-display); font-weight: 700; font-size: 20px; }
 .debug { border-top: 1px dashed var(--warn); padding-top: 12px; }
 .debug .eyebrow { color: var(--warn); }
+
+/* 同期が切れたときの帯(消えない) */
+.sync-bad { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 10px 16px; background: var(--bad); color: var(--ink); font-weight: 700; font-size: 15px; }
+.sync-bad .btn { flex: none; }

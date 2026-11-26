@@ -81,7 +81,7 @@
     Store.kind = 'shared';
     const ref = (p) => F.doc(db, ...p.split('/'));
     let unsubs = [];
-    const onErr = (e) => toast('同期が止まりました。ページを開き直してください(' + errText(e) + ')');
+    const onErr = (e) => { Store.syncErr = '同期が止まりました。ページを開き直してください(' + errText(e) + ')'; toast(Store.syncErr); Store.emit(); };
     function attach() {
       unsubs.forEach((u) => { try { u(); } catch (e) { /* 外すだけ */ } });
       unsubs = [];
@@ -133,7 +133,10 @@
       const b = F.writeBatch(db);
       b.set(ref('ap/gm'), body);
       b.set(ref('ap/game'), publicView(body));
-      chain = chain.then(() => b.commit()).catch((e) => { try { writeErr(e); } catch (x) { /* 知らせた */ } });
+      Store.pendingN = (Store.pendingN || 0) + 1;
+      if (!Store.pendingSince) Store.pendingSince = Date.now();
+      chain = chain.then(() => b.commit()).catch((e) => { try { writeErr(e); } catch (x) { /* 知らせた */ } })
+        .then(() => { Store.pendingN--; if (!Store.pendingN) { Store.pendingSince = 0; Store.emit(); } });
       return chain;
     };
     Store.putDoc = (coll, id, doc) => {
@@ -279,7 +282,7 @@
       case 'FREE':
         if (r === 1) return { mc: '交渉開始です。時間は' + min(C.freeMs) + '分。共通カードはこの2枚です。ラウンド1で交換できるのはカードだけです。', staff: '共通カード2枚を卓で表にする(画面には出ない)。交換が1枚⇄1枚になっているか見る。' };
         if (!rv) return { mc: '交渉開始です。時間は' + min(C.freeMs) + '分。チップの受け渡しもできます。', staff: '共通カードは公開しない。交換が1枚⇄1枚になっているか見る。' };
-        return { mc: '交渉開始です。時間は' + min(C.freeMs) + '分。共通カードは' + min(rv[0]) + '分後と' + min(rv[1]) + '分後に1枚ずつ公開します。チップの受け渡しもできます。', staff: '共通カードは卓でめくる(画面には出ない)。1枚目は' + min(rv[0]) + '分後、2枚目は' + min(rv[1]) + '分後。めくるまでの残りはGMの画面に出る。' };
+        return { mc: '交渉開始です。時間は' + min(C.freeMs) + '分。共通カードは' + min(rv[0]) + '分後と' + min(rv[1]) + '分後に1枚ずつ公開します。チップの受け渡しもできます。', staff: '共通カードは卓でめくる(画面には出ない)。1枚目は' + min(rv[0]) + '分後、2枚目は' + min(rv[1]) + '分後。めくるまでの残りはGMの画面に出る。' + (E.hasDeals() && E.community(r).length > rv.length ? '3枚目は伏せたまま、めくらずに判定に入る(ジャッジには入っている)。' : '') };
       case 'ENTRY': return { mc: '交渉終了です。手元の画面で、カード5枚と所持チップを入力してください。入力が済んだらカードを係に渡してください。', staff: '実物のカードを回収する。未提出の席に声をかける。' };
       case 'JUDGED': return { mc: 'ジャッジの結果が出ました。', staff: 'GM: 下の「ジャッジ」で1〜10位を確かめてから公開する。' };
       case 'SHOWDOWN': return { mc: 'SHOWDOWN。上位5名はこちらです。順位ボーナスは精算でまとめてお渡しします。', staff: '順位ボーナスはまだ配らない。' };
@@ -510,6 +513,15 @@
   /* ================= 画面の切り替え ================= */
   function route() { const h = (location.hash || '').replace('#', ''); return ['gm', 'display', 'play'].includes(h) ? h : 'home'; }
   let lastView = null, lastSig = null, pending = false, rafId = 0;
+  /* 同期の帯: 購読が止まったとき、または保存が8秒たっても届かないとき */
+  function syncBadText() {
+    if (Store.kind !== 'shared') return '';
+    if (Store.syncErr) return Store.syncErr;
+    if (Store.pendingSince && Date.now() - Store.pendingSince > 8000) return '保存がまだ届いていません。回線を確かめてください。直らなければページを開き直してください。';
+    return '';
+  }
+  let lastBad = '';
+  setInterval(() => { const b = syncBadText(); if (b !== lastBad) { lastBad = b; Store.emit(); } }, 2000);
   function scheduleRender() { if (rafId) return; rafId = requestAnimationFrame(() => { rafId = 0; render(false); }); }
   function render(force) {
     const v = route();
@@ -523,6 +535,8 @@
     else if (v === 'gm') { html = gmHtml(); sig = 'gm'; }
     else if (v === 'display') { html = displayHtml(); }
     else html = homeHtml();
+    const bad = syncBadText();
+    if (bad) { html = '<div class="sync-bad" role="alert"><span>' + esc(bad) + '</span><button class="btn btn-small" data-act="reload">開き直す</button></div>' + html; if (sig !== null) sig += '|bad'; }
     if (!force && v === lastView && typing) {
       if (v === 'play' && sig === lastSig) return;
       if (v !== 'play') { pending = true; return; }
@@ -804,7 +818,7 @@
     const nextPh = ORDER[ORDER.indexOf(g.phase) + 1];
     const dealWarn = E.hasDeals() ? '' : '<p class="alert">配札表が読み込まれていません。「設定」のタブで貼ってください。</p>';
     const nowPanel = '<section class="panel stack now"><div class="row"><p class="eyebrow grow">今</p>' + (g.timerEndsAt ? '<span class="count" ' + clockAttr(g) + '></span>' : '') + '</div>' +
-      '<h2>' + (r ? 'ラウンド' + r + ' · ' : '') + LABEL[g.phase] + '</h2>' + dealWarn + (note ? '<p>' + note + '</p>' : '') + readout + main + (g.phase === 'FINAL' ? finalTable(g) : '') +
+      '<h2>' + (r ? 'ラウンド' + r + ' · ' : '') + LABEL[g.phase] + '</h2>' + dealWarn + (note ? '<p>' + note + '</p>' : '') + readout + main + (g.phase === 'FINAL' ? finalTable(g) + '<div class="stack">' + newGameHtml() + '</div>' : '') +
       '<dl class="cue"><dt>司会</dt><dd>「' + esc(c.mc) + '」</dd><dt>係</dt><dd>' + esc(c.staff) + '</dd></dl>' +
       (r ? steps + (nextPh ? '<p class="quiet">次: ' + LABEL[nextPh] + '</p>' : (g.phase === 'RESULT' && r < 4 ? '<p class="quiet">次: ラウンド' + (r + 1) + 'の準備</p>' : '')) : '') + debugHtml(g) + '</section>';
     const alerts = alertsHtml(g);
@@ -908,14 +922,17 @@
     } else deal = dealsPanel();
     return '<div class="stack"><p><b>' + esc(C.version) + '</b><br><small>' + esc(C.note) + '</small></p><p class="eyebrow">順位ボーナス</p><div class="tbl-wrap">' + rb + '</div><p class="eyebrow">役ボーナス(1パターンあたり)</p><div class="tbl-wrap">' + ro + '</div>' + deal + '</div>';
   }
+  function newGameHtml() {
+    return '<p class="eyebrow" style="margin-top:8px">新しいゲームを作る</p><div class="row"><span class="seg" role="group" aria-label="新しいゲームの種類"><button data-act="gmode" data-v="test" aria-pressed="' + (GUI.mode === 'test') + '">TEST</button><button data-act="gmode" data-v="live" aria-pressed="' + (GUI.mode === 'live') + '">本番</button></span>' +
+      (GUI.mode === 'test' ? '<label class="row"><input type="checkbox" id="fast" data-act="gfast"' + (GUI.fast ? ' checked' : '') + '> <span>時計を1/10</span></label>' : '') +
+      armBtn('reset', (GUI.mode === 'live' ? '本番' : 'TEST') + 'のゲームを新しく作る', 'btn-danger') + '</div><small class="quiet">参加コードも作り直しになります。今のゲームは残りません。</small>';
+  }
   function opsHtml(g) {
     const timed = g.phase === 'FREE' || g.phase === 'AUCTION';
     let html = '<div class="stack"><p class="eyebrow">緊急</p><div class="row">' + armBtn('back', '段を1つ戻す', 'btn-danger') +
       (timed ? '<button class="btn btn-small" data-act="extend">時計を1分延ばす</button>' + armBtn('closeNow', '今すぐ締め切る', 'btn-danger') : '') +
       (g.phase === 'ENTRY' ? armBtn('closeNow', '未提出のまま締め切る', 'btn-danger') : '') + '</div>';
-    html += '<p class="eyebrow" style="margin-top:8px">新しいゲームを作る</p><div class="row"><span class="seg" role="group" aria-label="新しいゲームの種類"><button data-act="gmode" data-v="test" aria-pressed="' + (GUI.mode === 'test') + '">TEST</button><button data-act="gmode" data-v="live" aria-pressed="' + (GUI.mode === 'live') + '">本番</button></span>' +
-      (GUI.mode === 'test' ? '<label class="row"><input type="checkbox" id="fast" data-act="gfast"' + (GUI.fast ? ' checked' : '') + '> <span>時計を1/10</span></label>' : '') +
-      armBtn('reset', (GUI.mode === 'live' ? '本番' : 'TEST') + 'のゲームを新しく作る', 'btn-danger') + '</div><small class="quiet">参加コードも作り直しになります。今のゲームは残りません。</small>';
+    html += newGameHtml();
     html += '<p class="eyebrow" style="margin-top:8px">この試合の種類</p><div class="row"><span class="seg" role="group" aria-label="この試合の種類"><button data-act="setMode" data-v="test" aria-pressed="' + (g.mode === 'test') + '">TEST</button><button data-act="setMode" data-v="live" aria-pressed="' + (g.mode === 'live') + '">本番</button></span><small class="quiet">TESTのときは「今」の欄にデバッグの操作が出ます。</small></div>' +
       '<div class="row"><a class="btn btn-small" href="#display" target="_blank" rel="noopener">会場画面を別タブで開く</a>' + (Store.kind === 'shared' ? '<button class="btn btn-small" data-act="logout">ログアウト</button>' : '') + '</div>';
     html += '<p class="eyebrow" style="margin-top:8px">操作の記録</p><div class="tbl-wrap"><table>' + (g.log || []).slice().reverse().map((l) => '<tr><td class="num quiet" style="white-space:nowrap">' + new Date(l.t).toLocaleTimeString('ja-JP') + '</td><td class="wrapcell">' + esc(l.msg) + '</td></tr>').join('') + '</table></div></div>';
