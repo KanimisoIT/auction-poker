@@ -74,7 +74,8 @@
   async function sharedInit(cfg) {
     const [FA, A, F] = await Promise.all([import(SDK + 'firebase-app.js'), import(SDK + 'firebase-auth.js'), import(SDK + 'firebase-firestore.js')]);
     const fbApp = FA.initializeApp(cfg);
-    const auth = A.getAuth(fbApp);
+    /* 試験用: ?anon=1 のタブは、ほかのタブのログインを使わず、そのタブだけの匿名の参加者になる */
+    const auth = /[?&]anon=1/.test(location.search) ? A.initializeAuth(fbApp, { persistence: A.inMemoryPersistence }) : A.getAuth(fbApp);
     const db = F.getFirestore(fbApp);
     Store.fb = { A, F, auth, db };
     Store.kind = 'shared';

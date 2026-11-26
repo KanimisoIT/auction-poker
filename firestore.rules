@@ -5,8 +5,8 @@ service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() { return request.auth != null; }
     function isGM() {
-      return signedIn() && request.auth.token.email_verified == true
-        && request.auth.token.email in ['GMのメールアドレス'];
+      return signedIn() && request.auth.token.get('email_verified', false) == true
+        && request.auth.token.get('email', '') in ['GMのメールアドレス'];
     }
     function game() { return get(/databases/$(database)/documents/ap/game).data; }
     function hasMember() { return exists(/databases/$(database)/documents/members/$(request.auth.uid)); }
@@ -42,14 +42,14 @@ service cloud.firestore {
     }
     // カードの提出: 自分の席の分だけ、提出の段のあいだだけ。読めるのはGMと本人
     match /entries/{id} {
-      allow read: if isGM() || (signedIn() && (resource == null || resource.data.uid == request.auth.uid));
+      allow read: if isGM() || (signedIn() && (resource == null || resource.data.get('uid', '') == request.auth.uid));
       allow create, update: if isGM()
         || (ownsSeat(request.resource.data) && idOk(id, request.resource.data) && current(request.resource.data, 'ENTRY'));
       allow delete: if isGM();
     }
     // 入札: 自分の席の分を、オークションの段のあいだに一度だけ。読めるのはGMと本人
     match /bids/{id} {
-      allow read: if isGM() || (signedIn() && (resource == null || resource.data.uid == request.auth.uid));
+      allow read: if isGM() || (signedIn() && (resource == null || resource.data.get('uid', '') == request.auth.uid));
       allow create: if isGM()
         || (ownsSeat(request.resource.data) && idOk(id, request.resource.data) && current(request.resource.data, 'AUCTION'));
       allow update, delete: if isGM();
