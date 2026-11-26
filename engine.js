@@ -228,10 +228,30 @@
   const patternCount = (ids, role) => patternList(ids, role).length;
 
   /* ---------- オークション ---------- */
+  /* 自由記入の役名を役に読む。ひらがな・全角半角・空白・長音の揺れは吸収する。読めない名は null(入札は無効) */
+  const ROLE_NAMES = {
+    ONE_PAIR: ['ワンペア', '1ペア', 'ペア', 'onepair', '1pair', 'pair'],
+    TWO_PAIR: ['ツーペア', 'ツウペア', '2ペア', 'twopair', '2pair', '2pairs'],
+    THREE: ['スリーカード', 'スリーカーズ', '3カード', 'スリーオブアカインド', 'threecard', 'threecards', 'threeofakind', '3card', '3cards'],
+    STRAIGHT: ['ストレート', 'straight'],
+    FLUSH: ['フラッシュ', 'flush'],
+    FULL_HOUSE: ['フルハウス', 'fullhouse'],
+    FOUR: ['フォーカード', 'フォアカード', '4カード', 'フォーオブアカインド', 'fourcard', 'fourcards', 'fourofakind', '4card', '4cards'],
+    STRAIGHT_FLUSH: ['ストレートフラッシュ', 'straightflush'],
+    ROYAL_FLUSH: ['ロイヤルフラッシュ', 'ロイヤルストレートフラッシュ', 'ロイヤル', 'royalflush', 'royalstraightflush', 'royal'],
+    ALL_STAR: ['オールスター', 'オールスターズ', 'allstar', 'allstars']
+  };
+  function normRoleName(text) {
+    return String(text || '').normalize('NFKC').toLowerCase()
+      .replace(/[\u3041-\u3096]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0x60))
+      .replace(/[\s・･\-_.。、,!！?？ー〜~‐−–—「」『』()（）]/g, '');
+  }
+  const ROLE_INDEX = {};
+  Object.keys(ROLE_NAMES).forEach((k) => ROLE_NAMES[k].forEach((n) => { ROLE_INDEX[normRoleName(n)] = k; }));
   function freeTextRole(text, round) {
-    const t = String(text || '').normalize('NFKC').toLowerCase().replace(/[\s・･\-_.。、,!！]/g, '');
-    if (round === 4 && (t === 'オールスター' || t === 'allstar' || t === 'おーるすたー')) return 'ALL_STAR';
-    return null;
+    const k = ROLE_INDEX[normRoleName(text)];
+    if (!k) return null;
+    return rolesFor(round || 1).includes(k) ? k : null;
   }
   function toInt(v) {
     if (v === '' || v === null || v === undefined) return 0;
@@ -239,10 +259,19 @@
     if (!/^\d+$/.test(s)) return NaN;
     return parseInt(s, 10);
   }
-  /* bid = { amounts: {ONE_PAIR: 30, ...}, free: {text, amount} } */
+  /* bid = { items: [{text, amount}, ...] }(役名は自由記入)。古い形 { amounts: {ONE_PAIR: 30}, free: {text, amount} } も読む */
   function checkBid(bid, declared) {
     const errors = [];
     let total = 0;
+    (bid.items || []).forEach((it, i) => {
+      const v = toInt(it && it.amount);
+      const t = String((it && it.text) || '').trim();
+      const n = (i + 1) + '行目';
+      if (Number.isNaN(v)) { errors.push(n + 'の金額は数字で入れてください'); return; }
+      if (v > 0 && !t) errors.push(n + 'は役名も入れてください');
+      if (t && !v) errors.push(n + 'は金額も入れてください');
+      total += v || 0;
+    });
     for (const role of PUBLIC_ROLES) {
       const v = toInt(bid.amounts && bid.amounts[role]);
       if (Number.isNaN(v)) errors.push(ROLE_JA[role] + 'の金額は数字で入れてください');
@@ -265,13 +294,12 @@
     roles.forEach((r) => { byRole[r.role] = r; });
     for (const seat of Object.keys(bids)) {
       const b = bids[seat];
-      for (const role of PUBLIC_ROLES) {
-        const v = toInt(b.amounts && b.amounts[role]);
-        if (v > 0) byRole[role].bids.push({ seat, amount: v });
-      }
-      const fr = freeTextRole(b.free && b.free.text, round);
-      const fv = toInt(b.free && b.free.amount);
-      if (fr && fv > 0 && byRole[fr]) byRole[fr].bids.push({ seat, amount: fv });
+      const mine = {};   // 同じ役を二度書いたら、その席の入札は合計で一つ
+      const add = (role, v) => { if (role && byRole[role] && v > 0) mine[role] = (mine[role] || 0) + v; };
+      for (const role of PUBLIC_ROLES) add(role, toInt(b.amounts && b.amounts[role]));
+      add(freeTextRole(b.free && b.free.text, round), toInt(b.free && b.free.amount));
+      (b.items || []).forEach((it) => add(freeTextRole(it && it.text, round), toInt(it && it.amount)));
+      Object.keys(mine).forEach((role) => byRole[role].bids.push({ seat, amount: mine[role] }));
     }
     const seats = {};
     const seatRow = (s) => (seats[s] = seats[s] || { paid: 0, roleBonus: 0, wins: [] });

@@ -8,7 +8,7 @@
   const SEATS = E.SEATS;
   const SDK = 'https://www.gstatic.com/firebasejs/10.12.2/';
   /* この版の印。公開するたびに version.json と一緒に上げる */
-  const BUILD = '8';
+  const BUILD = '9';
   const app = document.getElementById('app');
   /* 時刻はサーバーの時計にそろえる(共有のとき、起動時と5分ごとに差を測る) */
   let clockOffset = 0;
@@ -384,7 +384,7 @@
         if (!b || b.submittedAt > limit || rd.chips[s] == null) return;
         const chk = E.checkBid(b, rd.chips[s]);
         if (!chk.ok) { log(g, s + '席の入札は条件を満たさないため無効'); return; }
-        bids[s] = { amounts: b.amounts || {}, free: b.free || {} };
+        bids[s] = { amounts: b.amounts || {}, free: b.free || {}, items: b.items || [] };
       });
       const hands = {};
       Object.keys(rd.cards).forEach((s) => { hands[s] = rd.cards[s].concat(E.community(r)); });
@@ -461,12 +461,12 @@
         const chips = rd.chips && rd.chips[s];
         if (chips == null) continue;
         const roles = E.PUBLIC_ROLES.slice().sort(() => Math.random() - 0.5).slice(0, 1 + Math.floor(Math.random() * 3));
-        const amounts = {};
+        const items = [];
         let left = chips;
-        roles.forEach((role) => { const v = Math.min(left, 5 * (1 + Math.floor(Math.random() * 6))); if (v > 0) { amounts[role] = v; left -= v; } });
-        const free = r === 4 && Math.random() < 0.3 && left >= 10 ? { text: 'オールスター', amount: 10 } : { text: '', amount: 0 };
-        const total = Object.values(amounts).reduce((a, b) => a + b, 0) + (free.amount || 0);
-        await Store.putDoc('bids', entryId(g, r, s), { gameId: g.id, round: r, seat: s, amounts, free, total, submittedAt: now(), by: 'test' });
+        roles.forEach((role) => { const v = Math.min(left, 5 * (1 + Math.floor(Math.random() * 6))); if (v > 0) { items.push({ text: E.ROLE_JA[role], amount: v }); left -= v; } });
+        if (r === 4 && Math.random() < 0.3 && left >= 10) { items.push({ text: 'オールスター', amount: 10 }); left -= 10; }
+        const total = items.reduce((a, it) => a + it.amount, 0);
+        await Store.putDoc('bids', entryId(g, r, s), { gameId: g.id, round: r, seat: s, items, total, submittedAt: now(), by: 'test' });
       }
       toast('全席にランダムな入札を入れました');
     },
@@ -602,6 +602,17 @@
   }
 
   /* ================= プレイヤー ================= */
+  /* 入札は役名も金額も自由記入。行は最初に3つ、足せるのは12まで */
+  const BID_ROWS0 = 3, BID_ROWS_MAX = 12;
+  const blankBidRows = (n) => Array.from({ length: n }, () => ({ text: '', amount: '' }));
+  /* 送った入札・確かめる入札の行(書いたとおりに出す。役として読めたかは見せない) */
+  function bidLines(b) {
+    const out = [];
+    E.PUBLIC_ROLES.forEach((k) => { const v = E.toInt(b.amounts && b.amounts[k]); if (v > 0) out.push([E.ROLE_JA[k], v]); });
+    if (b.free && String(b.free.text || '').trim()) out.push([b.free.text, E.toInt(b.free.amount)]);
+    (b.items || []).forEach((it) => { const t = String(it.text || '').trim(); if (t) out.push([t, E.toInt(it.amount)]); });
+    return out.map(([t, v]) => '<tr><td>' + esc(t) + '</td><td class="n">' + (Number.isNaN(v) ? '—' : v) + '</td></tr>');
+  }
   const PUI = { key: '', step: 'edit', pick: [], chips: '', bid: null, bidStep: 'edit', bidErr: [], join: '', joinSeat: null, joinCode: '', rev: 0, busy: false };
   function mySeat(g) {
     const proxy = ss.get('ap.proxy');
@@ -622,7 +633,7 @@
     const e = entryOf(g, g.round, me.seat);
     PUI.pick = e ? e.cards.slice() : [];
     PUI.chips = e ? String(e.chips) : (g.round === 1 ? String(C.startChips) : '');
-    PUI.bid = { amounts: {}, free: { text: '', amount: '' } };
+    PUI.bid = { items: blankBidRows(BID_ROWS0) };
   }
   function playerHtml() {
     const g = G();
@@ -708,24 +719,22 @@
     const timer = '<p class="p-count count" ' + clockAttr(g) + '></p>';
     if (declared == null) return timer + msg('入札できません', 'このラウンドのカード提出がないため、入札はできません。');
     if (b) {
-      const lines = E.PUBLIC_ROLES.filter((k) => E.toInt(b.amounts && b.amounts[k]) > 0).map((k) => '<tr><td>' + E.ROLE_JA[k] + '</td><td class="n">' + E.toInt(b.amounts[k]) + '</td></tr>');
-      if (b.free && b.free.text) lines.push('<tr><td>' + esc(b.free.text) + '</td><td class="n">' + E.toInt(b.free.amount) + '</td></tr>');
+      const lines = bidLines(b);
       return timer + '<section class="panel stack"><p class="eyebrow">送信済み</p>' + (lines.length ? '<table>' + lines.join('') + '<tr><th>合計</th><th class="n">' + b.total + '</th></tr></table>' : '<p>入札なしで送信しました。</p>') + '<p class="quiet">結果はスクリーンで発表します。</p></section>';
     }
     if (PUI.bidStep === 'confirm') {
       const d = PUI.bid;
-      const lines = E.PUBLIC_ROLES.filter((k) => E.toInt(d.amounts[k]) > 0).map((k) => '<tr><td>' + E.ROLE_JA[k] + '</td><td class="n">' + E.toInt(d.amounts[k]) + '</td></tr>');
-      if (String(d.free.text).trim()) lines.push('<tr><td>' + esc(d.free.text) + '</td><td class="n">' + E.toInt(d.free.amount) + '</td></tr>');
+      const lines = bidLines(d);
       const chk = E.checkBid(d, declared);
       return timer + '<section class="panel stack"><p class="eyebrow">この内容で送信しますか</p>' + (lines.length ? '<table>' + lines.join('') + '<tr><th>合計</th><th class="n">' + chk.total + ' / ' + declared + '</th></tr></table>' : '<p>入札なしで送信します。</p>') +
         '<p class="alert">送信したあとは変更できません。</p><button class="btn btn-main btn-big" data-act="bidSubmit">送信する</button><button class="btn" data-act="bidBack">戻って直す</button></section>';
     }
     const d = PUI.bid;
-    const rows = E.PUBLIC_ROLES.map((k) => '<div class="bid-row"><div><span class="rn">' + E.ROLE_JA[k] + '</span><small>1パターン ' + E.roleBonusOf(k, r) + 'チップ</small></div><input id="bid-' + k + '" data-bid="' + k + '" inputmode="numeric" pattern="[0-9]*" placeholder="—" value="' + esc(d.amounts[k] || '') + '" aria-label="' + E.ROLE_JA[k] + 'の入札額"></div>').join('');
-    const free = '<div class="bid-row free"><div><input id="bid-free-text" class="ft" data-free="text" placeholder="その他の役名(自由記入)" value="' + esc(d.free.text) + '" aria-label="その他の役名"></div><input id="bid-free-amt" data-free="amount" inputmode="numeric" pattern="[0-9]*" placeholder="—" value="' + esc(d.free.amount) + '" aria-label="その他の役の入札額"></div>';
+    const rows = d.items.map((it, i) => '<div class="bid-row free"><div><input id="bid-text-' + i + '" class="ft" data-item="' + i + '" data-field="text" placeholder="役名" autocomplete="off" autocapitalize="off" spellcheck="false" value="' + esc(it.text) + '" aria-label="' + (i + 1) + '行目の役名"></div><input id="bid-amt-' + i + '" data-item="' + i + '" data-field="amount" inputmode="numeric" pattern="[0-9]*" placeholder="—" value="' + esc(it.amount) + '" aria-label="' + (i + 1) + '行目の入札額"></div>').join('');
+    const free = d.items.length < BID_ROWS_MAX ? '<button class="btn btn-small" data-act="bidAddRow">行を足す</button>' : '';
     const chk = E.checkBid(d, declared);
     return timer + '<div class="tray" style="padding-block:8px"><div class="sum-bar"><span>入札の合計 / 所持</span><span><b id="bid-total" class="count ' + (chk.total > declared ? 'over' : '') + '">' + (Number.isNaN(chk.total) ? '—' : chk.total) + '</b> <span class="quiet">/ ' + declared + '</span></span></div></div>' +
-      '<p class="quiet">入札は1回だけ。合計は所持チップまで。入れない役は空欄のままにしてください。</p>' +
+      '<p class="quiet">役名と金額を書いてください。入札は1回だけ、合計は所持チップまでです。</p>' +
       '<div class="bid-list">' + rows + free + '</div><div id="bid-err" class="stack" role="alert">' + PUI.bidErr.map((m) => '<p class="alert">' + esc(m) + '</p>').join('') + '</div>' +
       '<div class="bottom-bar"><button class="btn btn-main btn-big" data-act="bidConfirm">内容を確かめる</button></div>';
   }
@@ -915,7 +924,7 @@
       return '<div class="tbl-wrap"><table><tr><th>役</th><th>入札(高い順)</th><th>落札</th><th class="n">落札額</th><th>成立したパターン</th><th class="n">役ボーナス</th></tr>' + rd.tally.roles.map((x) => '<tr><td>' + E.ROLE_JA[x.role] + '</td><td>' + (x.bids.map((b) => b.seat + ':' + b.amount).join(' ') || '<span class="quiet">なし</span>') + '</td><td>' + (x.winner ? x.winner : (x.tie ? '<span class="minus">同額で落札なし</span>' : '—')) + '</td><td class="n">' + (x.winner ? x.top : '') + '</td><td class="wrapcell">' + (x.winner ? (x.patterns.length ? esc(x.patterns.join('、')) : '<span class="quiet">不成立</span>') : '') + '</td><td class="n">' + (x.winner ? x.reward : '') + '</td></tr>').join('') + '</table></div>';
     }
     if (g.phase !== 'AUCTION') return '<p class="quiet">オークションが始まると送信の状況、締め切ると役ごとの結果が出ます。</p>';
-    return '<div class="tbl-wrap"><table><tr><th>席</th><th>入札</th><th class="n">合計</th></tr>' + SEATS.map((s) => { const b = bidOf(g, r, s); if (!b) return '<tr><td>' + s + '</td><td class="quiet">未送信</td><td></td></tr>'; const parts = E.PUBLIC_ROLES.filter((k) => E.toInt(b.amounts[k]) > 0).map((k) => E.ROLE_JA[k] + ' ' + E.toInt(b.amounts[k])); if (b.free && b.free.text) parts.push('「' + esc(b.free.text) + '」 ' + E.toInt(b.free.amount)); return '<tr><td>' + s + '</td><td class="wrapcell">' + (parts.join('、') || '入札なし') + '</td><td class="n">' + b.total + '</td></tr>'; }).join('') + '</table></div>';
+    return '<div class="tbl-wrap"><table><tr><th>席</th><th>入札</th><th class="n">合計</th></tr>' + SEATS.map((s) => { const b = bidOf(g, r, s); if (!b) return '<tr><td>' + s + '</td><td class="quiet">未送信</td><td></td></tr>'; const parts = E.PUBLIC_ROLES.filter((k) => E.toInt(b.amounts && b.amounts[k]) > 0).map((k) => E.ROLE_JA[k] + ' ' + E.toInt(b.amounts[k])); if (b.free && b.free.text) parts.push('「' + esc(b.free.text) + '」 ' + E.toInt(b.free.amount)); (b.items || []).forEach((it) => { const k = E.freeTextRole(it.text, r); parts.push('「' + esc(it.text) + '」' + (k ? '→' + E.ROLE_JA[k] : '<span class="minus">→該当なし</span>') + ' ' + E.toInt(it.amount)); }); return '<tr><td>' + s + '</td><td class="wrapcell">' + (parts.join('、') || '入札なし') + '</td><td class="n">' + b.total + '</td></tr>'; }).join('') + '</table></div>';
   }
   function payoutHtml(g) {
     const rd = g.rounds[g.round] || {};
@@ -1067,6 +1076,7 @@
       render(true);
     },
     bidBack() { PUI.bidStep = 'edit'; render(true); },
+    bidAddRow() { if (PUI.bid.items.length < BID_ROWS_MAX) { PUI.bid.items.push({ text: '', amount: '' }); PUI.rev++; render(true); const n = document.getElementById('bid-text-' + (PUI.bid.items.length - 1)); if (n) n.focus(); } },
     async bidSubmit(el) {
       const g = G();
       const me = mySeat(g);
@@ -1075,10 +1085,8 @@
       const chk = E.checkBid(PUI.bid, rd.chips[me.seat]);
       if (!chk.ok) { PUI.bidErr = chk.errors; PUI.bidStep = 'edit'; render(true); return; }
       el.disabled = true;
-      const amounts = {};
-      E.PUBLIC_ROLES.forEach((k) => { const v = E.toInt(PUI.bid.amounts[k]); if (v > 0) amounts[k] = v; });
-      const free = { text: String(PUI.bid.free.text || '').trim(), amount: E.toInt(PUI.bid.free.amount) || 0 };
-      try { await Store.putDoc('bids', entryId(g, g.round, me.seat), { gameId: g.id, round: g.round, seat: me.seat, amounts, free, total: chk.total, submittedAt: now(), by: me.proxy ? 'gm' : 'player' }); }
+      const items = PUI.bid.items.map((it) => ({ text: String(it.text || '').trim(), amount: E.toInt(it.amount) || 0 })).filter((it) => it.text && it.amount > 0);
+      try { await Store.putDoc('bids', entryId(g, g.round, me.seat), { gameId: g.id, round: g.round, seat: me.seat, items, total: chk.total, submittedAt: now(), by: me.proxy ? 'gm' : 'player' }); }
       catch (e) { el.disabled = false; }
       render(true);
     }
@@ -1096,8 +1104,7 @@
     const el = ev.target;
     if (el.id === 'chips') PUI.chips = el.value;
     else if (el.id === 'join-code') PUI.join = el.value;
-    else if (el.dataset.bid) { PUI.bid.amounts[el.dataset.bid] = el.value; updateBidTotal(); }
-    else if (el.dataset.free) { PUI.bid.free[el.dataset.free] = el.value; updateBidTotal(); }
+    else if (el.dataset.item != null && PUI.bid && PUI.bid.items[+el.dataset.item]) { PUI.bid.items[+el.dataset.item][el.dataset.field] = el.value; updateBidTotal(); }
   });
   app.addEventListener('change', (ev) => {
     const el = ev.target;
