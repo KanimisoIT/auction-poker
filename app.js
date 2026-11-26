@@ -432,7 +432,8 @@
       log(g, '段を戻す → R' + g.round + ' ' + LABEL[g.phase]);
       await Store.setGame(g);
     },
-    async reset() { const g = G(); await act.createGame({ mode: g ? g.mode : 'test', fast: g ? g.fast : false }); },
+    /* 新しいゲームは「緊急」のタブで選んだ種類と時計で作る(前の試合の設定は引き継がない) */
+    async reset() { await act.createGame({ mode: GUI.mode, fast: GUI.mode === 'test' && GUI.fast }); },
     async rename(seat, name) { const g = clone(G()); g.seats[seat].name = name.trim() || ('プレイヤー' + seat); await Store.setGame(g); },
     async recode() { const g = clone(G()); const used = new Set(); SEATS.forEach((s) => { g.seats[s].code = newCode(used); }); log(g, '参加コードを作り直し'); await Store.writeCodes(g); await Store.setGame(g); },
     /* 稽古用 */
@@ -911,7 +912,10 @@
     const timed = g.phase === 'FREE' || g.phase === 'AUCTION';
     let html = '<div class="stack"><p class="eyebrow">緊急</p><div class="row">' + armBtn('back', '段を1つ戻す', 'btn-danger') +
       (timed ? '<button class="btn btn-small" data-act="extend">時計を1分延ばす</button>' + armBtn('closeNow', '今すぐ締め切る', 'btn-danger') : '') +
-      (g.phase === 'ENTRY' ? armBtn('closeNow', '未提出のまま締め切る', 'btn-danger') : '') + armBtn('reset', 'ゲームを作り直す', 'btn-danger') + '</div>';
+      (g.phase === 'ENTRY' ? armBtn('closeNow', '未提出のまま締め切る', 'btn-danger') : '') + '</div>';
+    html += '<p class="eyebrow" style="margin-top:8px">新しいゲームを作る</p><div class="row"><span class="seg" role="group" aria-label="新しいゲームの種類"><button data-act="gmode" data-v="test" aria-pressed="' + (GUI.mode === 'test') + '">TEST</button><button data-act="gmode" data-v="live" aria-pressed="' + (GUI.mode === 'live') + '">本番</button></span>' +
+      (GUI.mode === 'test' ? '<label class="row"><input type="checkbox" id="fast" data-act="gfast"' + (GUI.fast ? ' checked' : '') + '> <span>時計を1/10</span></label>' : '') +
+      armBtn('reset', (GUI.mode === 'live' ? '本番' : 'TEST') + 'のゲームを新しく作る', 'btn-danger') + '</div><small class="quiet">参加コードも作り直しになります。今のゲームは残りません。</small>';
     html += '<p class="eyebrow" style="margin-top:8px">この試合の種類</p><div class="row"><span class="seg" role="group" aria-label="この試合の種類"><button data-act="setMode" data-v="test" aria-pressed="' + (g.mode === 'test') + '">TEST</button><button data-act="setMode" data-v="live" aria-pressed="' + (g.mode === 'live') + '">本番</button></span><small class="quiet">TESTのときは「今」の欄にデバッグの操作が出ます。</small></div>' +
       '<div class="row"><a class="btn btn-small" href="#display" target="_blank" rel="noopener">会場画面を別タブで開く</a>' + (Store.kind === 'shared' ? '<button class="btn btn-small" data-act="logout">ログアウト</button>' : '') + '</div>';
     html += '<p class="eyebrow" style="margin-top:8px">操作の記録</p><div class="tbl-wrap"><table>' + (g.log || []).slice().reverse().map((l) => '<tr><td class="num quiet" style="white-space:nowrap">' + new Date(l.t).toLocaleTimeString('ja-JP') + '</td><td class="wrapcell">' + esc(l.msg) + '</td></tr>').join('') + '</table></div></div>';
