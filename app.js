@@ -8,7 +8,7 @@
   const SEATS = E.SEATS;
   const SDK = 'https://www.gstatic.com/firebasejs/10.12.2/';
   /* この版の印。公開するたびに version.json と一緒に上げる */
-  const BUILD = '10';
+  const BUILD = '11';
   const app = document.getElementById('app');
   /* 時刻はサーバーの時計にそろえる(共有のとき、起動時と5分ごとに差を測る) */
   let clockOffset = 0;
@@ -65,6 +65,7 @@
     }
     Store.setGame = async (g) => { const b = clone(g); b.rev = (b.rev || 0) + 1; Store.data.full = b; save(); };
     Store.putDoc = async (coll, id, doc) => { Store.data[coll] = Object.assign({}, Store.data[coll], { [id]: clone(doc) }); save(); };
+    Store.patchDoc = async (coll, id, fields) => { Store.data[coll] = Object.assign({}, Store.data[coll], { [id]: Object.assign({}, Store.data[coll][id], clone(fields)) }); save(); };
     Store.lookupCode = async (code) => { const g = Store.data.full; const s = g && SEATS.find((x) => g.seats[x].code === code); return s ? { seat: s, gameId: g.id } : null; };
     Store.setMember = async (m) => { Store.data.joins = Object.assign({}, Store.data.joins, { [m.gameId + '_' + m.seat]: m }); save(); };
     Store.setDeals = async (d) => { Store.deals = d; E.setDeals(d); save(); };
@@ -148,6 +149,16 @@
       Store.emit();
       return F.setDoc(F.doc(db, coll, id), body).catch((e) => {
         const m = Object.assign({}, Store.data[coll]); delete m[id]; Store.data[coll] = m; Store.emit();
+        writeErr(e);
+      });
+    };
+    /* 一部の欄だけを書き換える(持ち主の uid はそのまま残す) */
+    Store.patchDoc = (coll, id, fields) => {
+      const prev = Store.data[coll][id];
+      Store.data[coll] = Object.assign({}, Store.data[coll], { [id]: Object.assign({}, prev, clone(fields)) });
+      Store.emit();
+      return F.updateDoc(F.doc(db, coll, id), clone(fields)).catch((e) => {
+        Store.data[coll] = Object.assign({}, Store.data[coll], { [id]: prev }); Store.emit();
         writeErr(e);
       });
     };
@@ -347,6 +358,44 @@
     const p = Store.data.progress;
     return p && p.gameId === g.id && p.round === g.round ? p : { entries: 0, bids: 0 };
   }
+  /* 所持チップ(申告)。カード提出を締め切る前は提出の値、締め切った後はラウンドに写した値。直せない段では null */
+  const closedPhase = (g) => g.phase === 'FINAL' || ORDER.indexOf(g.phase) >= ORDER.indexOf('JUDGED');
+  function chipsNow(g, s) {
+    const r = g.round;
+    if (!r) return null;
+    if (g.phase === 'ENTRY') { const e = entryOf(g, r, s); return e ? e.chips : null; }
+    const rd = g.rounds[r];
+    return closedPhase(g) && rd && rd.chips && rd.chips[s] != null ? rd.chips[s] : null;
+  }
+  /* 直す前の申告(直していなければ null) */
+  function chipsFrom(g, s) {
+    const r = g.round;
+    if (!r) return null;
+    if (g.phase === 'ENTRY') { const e = entryOf(g, r, s); return e && e.chipsFrom != null && e.chipsFrom !== e.chips ? e.chipsFrom : null; }
+    const f = closedPhase(g) && g.rounds[r] && g.rounds[r].chipFix && g.rounds[r].chipFix[s];
+    return f ? f.from : null;
+  }
+  /* オークションの集計(締め切りの時と、所持チップを直した時に同じ計算をする) */
+  function auctionOf(g, r) {
+    const rd = g.rounds[r];
+    const limit = rd.bidLimit != null ? rd.bidLimit : Infinity;
+    const bids = {}, rejected = [];
+    SEATS.forEach((s) => {
+      const b = bidOf(g, r, s);
+      if (!b || b.submittedAt > limit || rd.chips[s] == null) return;
+      if (!E.checkBid(b, rd.chips[s]).ok) { rejected.push(s); return; }
+      bids[s] = { amounts: b.amounts || {}, free: b.free || {}, items: b.items || [] };
+    });
+    const hands = {};
+    Object.keys(rd.cards).forEach((s) => { hands[s] = rd.cards[s].concat(E.community(r)); });
+    const tally = E.tally(r, bids, hands);
+    return { bids, tally, settle: E.settle(r, rd.judge, tally, rd.chips), rejected };
+  }
+  const winKey = (t) => t.roles.map((x) => x.role + ':' + (x.winner || '-') + ':' + (x.top || 0)).join(',');
+  function finalOf(g) {
+    const st = g.rounds[4] && g.rounds[4].settle;
+    return SEATS.map((s) => ({ seat: s, chips: st && st[s] ? st[s].balance : null })).sort((a, b) => (b.chips ?? -1) - (a.chips ?? -1));
+  }
   function setPhase(g, phase, extra) { Object.assign(g, { phase, phaseAt: now() }, extra || {}); log(g, 'R' + g.round + ' ' + LABEL[phase]); }
   function needDeals() { if (E.hasDeals()) return false; toast('配札表が読み込まれていません。「設定」のタブで貼ってください'); GUI.tab = 'config'; render(true); return true; }
 
@@ -365,6 +414,9 @@
       Object.keys(st.cards).forEach((s) => { hands[s] = st.cards[s].concat(E.community(r)); });
       const judge = E.rankHands(hands, r).map((x) => ({ seat: x.seat, key: x.key, best: x.best, name: x.name, pos: x.pos, bonus: x.bonus }));
       g.rounds[r] = { cards: st.cards, chips: st.chips, judge, closedAt: now(), forced: !!force };
+      const fix = {};   // 締め切る前にGMが直した所持チップ
+      SEATS.forEach((s) => { const e = entryOf(g, r, s); if (e && e.chipsFrom != null && e.chipsFrom !== e.chips) fix[s] = { from: e.chipsFrom, to: e.chips, at: e.chipsFixedAt || now() }; });
+      if (Object.keys(fix).length) g.rounds[r].chipFix = fix;
       setPhase(g, 'JUDGED', { timerEndsAt: null });
       if (force) log(g, 'カード提出を強制締切(' + st.count + '/10)');
       await Store.setGame(g);
@@ -378,20 +430,10 @@
       if (allIn) log(g, '全員の入札がそろったので締め切り');
       const rd = g.rounds[r];
       const limit = (g.timerEndsAt || Infinity) + 3000;
-      const bids = {};
-      SEATS.forEach((s) => {
-        const b = bidOf(g, r, s);
-        if (!b || b.submittedAt > limit || rd.chips[s] == null) return;
-        const chk = E.checkBid(b, rd.chips[s]);
-        if (!chk.ok) { log(g, s + '席の入札は条件を満たさないため無効'); return; }
-        bids[s] = { amounts: b.amounts || {}, free: b.free || {}, items: b.items || [] };
-      });
-      const hands = {};
-      Object.keys(rd.cards).forEach((s) => { hands[s] = rd.cards[s].concat(E.community(r)); });
-      const tally = E.tally(r, bids, hands);
-      rd.bids = bids;
-      rd.tally = tally;
-      rd.settle = E.settle(r, rd.judge, tally, rd.chips);
+      if (Number.isFinite(limit)) rd.bidLimit = limit;   // 直したときの集計し直しでも同じ締め切りを使う
+      const res = auctionOf(g, r);
+      res.rejected.forEach((s) => log(g, s + '席の入札は条件を満たさないため無効'));
+      Object.assign(rd, { bids: res.bids, tally: res.tally, settle: res.settle });
       setPhase(g, 'TALLIED', { timerEndsAt: null });
       await Store.setGame(g);
     },
@@ -400,8 +442,7 @@
       const g = clone(G());
       if (g.round < 4) { g.round += 1; setPhase(g, 'READY', { timerEndsAt: null, freeStartedAt: null }); }
       else {
-        const st = g.rounds[4] && g.rounds[4].settle;
-        g.final = SEATS.map((s) => ({ seat: s, chips: st && st[s] ? st[s].balance : null })).sort((a, b) => (b.chips ?? -1) - (a.chips ?? -1));
+        g.final = finalOf(g);
         setPhase(g, 'FINAL', { timerEndsAt: null });
       }
       await Store.setGame(g);
@@ -441,6 +482,39 @@
     async reset() { await act.createGame({ mode: GUI.mode, fast: GUI.mode === 'test' && GUI.fast }); },
     async rename(seat, name) { const g = clone(G()); g.seats[seat].name = name.trim() || ('プレイヤー' + seat); await Store.setGame(g); },
     async recode() { const g = clone(G()); const used = new Set(); SEATS.forEach((s) => { g.seats[s].code = newCode(used); }); log(g, '参加コードを作り直し'); await Store.writeCodes(g); await Store.setGame(g); },
+    /* 所持チップ(申告)をGMが直す。カード提出からどの段でも。提出の記録も直すので、段を戻して締め切り直しても直した値が残る。
+       締め切った後なら入札の上限に効き、集計の後なら集計と払い出し、最終結果も計算し直す。返り値: false=直せなかった / 文字=知らせ */
+    async fixChips(seat, value) {
+      const g0 = G();
+      const r = g0.round;
+      const from = chipsNow(g0, seat);
+      if (from == null) { toast(seat + '席は、まだ直せる所持チップがありません'); return false; }
+      if (from === value) return '';
+      const rd0 = g0.rounds[r];
+      if (closedPhase(g0) && rd0 && rd0.tally && needDeals()) return false;
+      const e = entryOf(g0, r, seat);
+      if (e) await Store.patchDoc('entries', entryId(g0, r, seat), { chips: value, chipsFrom: e.chipsFrom != null ? e.chipsFrom : e.chips, chipsFixedAt: now() });
+      const g = clone(G());   // 書いている間に段が進んでいても、今の状態に当てる
+      const rd = g.rounds[r];
+      let note = '';
+      if (closedPhase(g) && rd && rd.chips && rd.chips[seat] != null) {
+        const orig = rd.chipFix && rd.chipFix[seat] ? rd.chipFix[seat].from : (e && e.chipsFrom != null ? e.chipsFrom : rd.chips[seat]);
+        rd.chips[seat] = value;
+        rd.chipFix = Object.assign({}, rd.chipFix);
+        if (orig === value) delete rd.chipFix[seat]; else rd.chipFix[seat] = { from: orig, to: value, at: now() };
+        if (!Object.keys(rd.chipFix).length) delete rd.chipFix;
+        if (rd.tally) {
+          const before = winKey(rd.tally);
+          const res = auctionOf(g, r);
+          Object.assign(rd, { bids: res.bids, tally: res.tally, settle: res.settle });
+          if (winKey(res.tally) !== before) note = '落札結果が変わった';
+        }
+        if (g.phase === 'FINAL') g.final = finalOf(g);
+      }
+      log(g, 'R' + r + ' ' + seat + '席の所持チップを ' + from + ' → ' + value + ' に直した' + (note ? '(' + note + ')' : ''));
+      await Store.setGame(g);
+      return note;
+    },
     /* 稽古用 */
     async fillCards() {
       if (needDeals()) return;
@@ -563,7 +637,15 @@
     tickText();
     if (v === 'play') afterPlayerRender();
   }
-  app.addEventListener('focusout', () => { setTimeout(() => { const a = document.activeElement; const still = a && app.contains(a) && a.matches('input, textarea'); if (pending && !still) render(true); }, 0); });
+  /* 入力の欄から出たら、止めていた描き直しをする。ただしボタンを押している最中は、押し終えてから
+     (描き直しでボタンが差し替わると、押した手が届かない) */
+  let pressing = false, pressTimer = 0;
+  function flushPending() { const a = document.activeElement; const still = a && app.contains(a) && a.matches('input, textarea'); if (pending && !still) render(true); }
+  app.addEventListener('pointerdown', () => { pressing = true; clearTimeout(pressTimer); }, true);
+  const pressEnd = () => { if (!pressing) return; pressing = false; clearTimeout(pressTimer); pressTimer = setTimeout(flushPending, 400); };
+  window.addEventListener('pointerup', pressEnd, true);
+  window.addEventListener('pointercancel', pressEnd, true);
+  app.addEventListener('focusout', () => { setTimeout(() => { if (!pressing) flushPending(); }, 0); });
   window.addEventListener('hashchange', () => render(true));
   Store.onChange(scheduleRender);
 
@@ -644,7 +726,7 @@
     const r = g.round;
     const e = r ? entryOf(g, r, me.seat) : null;
     const b = r ? bidOf(g, r, me.seat) : null;
-    const sig = [g.id, g.phase, r, me.seat, me.proxy, e && e.submittedAt, b && b.submittedAt, PUI.step, PUI.bidStep, PUI.rev, g.timerEndsAt, g.rev].join('|');
+    const sig = [g.id, g.phase, r, me.seat, me.proxy, e && e.submittedAt, e && e.chips, b && b.submittedAt, PUI.step, PUI.bidStep, PUI.rev, g.timerEndsAt, g.rev].join('|');
     let body = '';
     const head = (me.proxy ? '<div class="proxy-bar"><span>GMが' + me.seat + '席の代わりに入力しています</span><button class="btn btn-small" data-act="proxyExit" style="background:var(--ink);color:var(--ivory);border-color:var(--ink)">GMの画面に戻る</button></div>' : '') +
       '<header class="p-head"><div class="seat-badge">' + me.seat + '</div><div class="who grow"><b>' + esc(seatName(g, me.seat)) + '</b><small>' + (r ? 'ラウンド' + r + ' · ' : '') + LABEL[g.phase] + '</small></div></header>';
@@ -782,7 +864,13 @@
         body = '<p class="disp-title">SHOWDOWN</p><table class="disp-table">' + '<tr><th>順位</th><th>プレイヤー</th><th class="n">順位ボーナス</th></tr>' + rows.map((x) => '<tr><td class="pos">' + x.pos + '</td><td>' + esc(seatName(g, x.seat)) + '</td><td class="n amt">' + x.bonus + '</td></tr>').join('') + '</table>';
         break;
       }
-      case 'AUCTION': body = '<p class="disp-title">AUCTION TIME</p><p class="count disp-count" ' + clockAttr(g) + '></p><p class="disp-sub">送信 <span class="num">' + progressOf(g).bids + '</span> / ' + bidTargets(g).length + '</p>'; break;
+      case 'AUCTION': {
+        // このラウンドの役ボーナス(オールスターは落札があるまで出さない。落札結果の一覧と同じ扱い)
+        const bonus = '<table class="disp-table disp-bonus">' + E.PUBLIC_ROLES.map((k) => '<tr><td>' + E.ROLE_JA[k] + '</td><td class="n amt">' + E.roleBonusOf(k, r) + '</td></tr>').join('') + '</table>';
+        body = '<div class="disp-split"><div class="disp-side"><p class="disp-title">AUCTION TIME</p><p class="count disp-count" ' + clockAttr(g) + '></p><p class="disp-sub">送信 <span class="num">' + progressOf(g).bids + '</span> / ' + bidTargets(g).length + '</p></div>' +
+          '<div class="disp-side"><p class="disp-sub">役ボーナス(1パターンあたり)</p>' + bonus + '</div></div>';
+        break;
+      }
       case 'TALLIED': body = '<p class="disp-title">RESULT</p><p class="disp-sub">落札結果を発表します</p>'; break;
       case 'RESULT': {
         const rows = resultRows(g);
@@ -800,7 +888,7 @@
   }
 
   /* ================= GM ================= */
-  const GUI = { tab: 'seats', armed: null, armedAt: 0, mode: 'test', fast: false, dealEdit: false };
+  const GUI = { tab: 'seats', armed: null, armedAt: 0, mode: 'test', fast: false, dealEdit: false, chipEdit: null, chipVal: '' };
   function armBtn(actName, label, cls) {
     const armed = GUI.armed === actName && now() - GUI.armedAt < 4000;
     return '<button class="btn btn-small ' + (armed ? 'btn-armed' : (cls || '')) + '" data-act="arm" data-a="' + actName + '">' + (armed ? 'もう一度押すと実行' : label) + '</button>';
@@ -888,6 +976,13 @@
       if (prev) SEATS.forEach((s) => { const e = entryOf(g, r, s); if (e && prev[s] && prev[s].balance != null && e.chips !== prev[s].balance) items.push('<p class="alert info">' + s + '席の申告 ' + e.chips + '(前回の計算 ' + prev[s].balance + '、差 ' + signed(e.chips - prev[s].balance) + ')</p>'); });
     }
     const rd = g.rounds[r];
+    if (g.phase === 'AUCTION' && rd && rd.chips) SEATS.forEach((s) => {
+      const b = bidOf(g, r, s);
+      if (!b || rd.chips[s] == null) return;
+      const chk = E.checkBid(b, rd.chips[s]);
+      if (chk.total > rd.chips[s]) items.push('<p class="alert">' + s + '席の入札(合計 ' + chk.total + ')は所持チップ ' + rd.chips[s] + ' を超えているため、締め切りで無効になります。</p>');
+    });
+    if (rd && rd.tally && rd.bids && closedPhase(g)) SEATS.forEach((s) => { if (bidOf(g, r, s) && !rd.bids[s]) items.push('<p class="alert info">' + s + '席の入札は集計に入れていません(所持チップを超えたか、締め切りの後の送信)。</p>'); });
     if (rd && rd.forced) items.push('<p class="alert info">このラウンドは未提出のまま締め切りました。</p>');
     if (!items.length) return '';
     return '<section class="panel stack"><p class="eyebrow">警告と参考</p>' + items.join('') + '</section>';
@@ -904,12 +999,32 @@
       return '<tr><td><b>' + s + '</b> <span class="dot ' + (j ? 'on' : '') + '" title="' + (j ? '参加済み' : '未参加') + '"></span></td>' +
         '<td>' + (setup ? '<input class="name-input" data-name="' + s + '" value="' + esc(seatName(g, s)) + '" aria-label="' + s + '席の名前">' : esc(seatName(g, s))) + '</td>' +
         '<td class="code">' + esc(g.seats[s].code) + '</td>' +
-        (setup ? '' : '<td>' + (e ? miniCards(e.cards) : '<span class="quiet">—</span>') + '</td><td class="n">' + (e ? e.chips : '—') + '</td><td>' + (b ? '<span class="pill ok">済</span>' : '<span class="quiet">—</span>') + '</td><td class="n">' + (st ? '<span class="' + (st.payout >= 0 ? 'plus' : 'minus') + '">' + signed(st.payout) + '</span>' : '') + '</td>') +
+        (setup ? '' : '<td>' + (e ? miniCards(e.cards) : '<span class="quiet">—</span>') + '</td><td class="n">' + chipCell(g, s) + '</td><td>' + (b ? '<span class="pill ok">済</span>' : '<span class="quiet">—</span>') + '</td><td class="n">' + (st ? '<span class="' + (st.payout >= 0 ? 'plus' : 'minus') + '">' + signed(st.payout) + '</span>' : '') + '</td>') +
         '<td><button class="btn btn-small" data-act="proxy" data-seat="' + s + '">代理</button></td></tr>';
     }).join('');
-    return '<div class="tbl-wrap"><table><tr><th>席</th><th>名前</th><th>コード</th>' + (setup ? '' : '<th>カード</th><th class="n">チップ</th><th>入札</th><th class="n">払い出し</th>') + '<th></th></tr>' + rows + '</table></div>' +
-      (setup ? '<div class="row" style="margin-top:12px"><button class="btn btn-small" data-act="recode">コードを作り直す</button><small class="quiet">● は参加済み。名前を変えると会場画面の表示も変わります。</small></div>' : '<p class="quiet" style="margin-top:8px;font-size:13px">「代理」でその席の画面を開き、GMが代わりに入力できます。</p>') +
+    return (setup ? '' : chipFixHtml(g)) + '<div class="tbl-wrap"><table><tr><th>席</th><th>名前</th><th>コード</th>' + (setup ? '' : '<th>カード</th><th class="n">チップ</th><th>入札</th><th class="n">払い出し</th>') + '<th></th></tr>' + rows + '</table></div>' +
+      (setup ? '<div class="row" style="margin-top:12px"><button class="btn btn-small" data-act="recode">コードを作り直す</button><small class="quiet">● は参加済み。名前を変えると会場画面の表示も変わります。</small></div>' : '<p class="quiet" style="margin-top:8px;font-size:13px">「代理」でその席の画面を開き、GMが代わりに入力できます。チップの数字を押すと、所持チップ(申告)をいつでも直せます。入札の上限・払い出し・残高は直した値で計算し直します。</p>') +
       '<p class="quiet" style="margin-top:8px;font-size:13px">プレイヤーのページ: <span class="url">' + esc(playerUrl()) + '</span></p>';
+  }
+  /* 席の一覧のチップの欄: 数字そのものが「直す」のボタン。直した席は元の申告を下に小さく出す */
+  function chipCell(g, s) {
+    const v = chipsNow(g, s);
+    if (v == null) return '<span class="quiet">—</span>';
+    const from = chipsFrom(g, s);
+    const val = '<b class="num">' + v + '</b>' + (from != null ? '<small class="quiet chip-was">申告 ' + from + '</small>' : '');
+    if (Store.readOnly) return val;
+    return '<button class="btn btn-small chip-btn' + (GUI.chipEdit === s ? ' on' : '') + '" data-act="chipEdit" data-seat="' + s + '" aria-label="' + s + '席の所持チップ ' + v + '。押すと直せます">' + val + '</button>';
+  }
+  /* 所持チップを直す欄(表の上に出す。表を横に送っていても、スマホの数字の鍵盤でも、保存が見える所に置く) */
+  function chipFixHtml(g) {
+    const s = GUI.chipEdit;
+    if (!s || Store.readOnly) return '';
+    const v = chipsNow(g, s);
+    if (v == null) return '';
+    const from = chipsFrom(g, s);
+    return '<div class="chip-fix stack"><p><b>' + s + '席 ' + esc(seatName(g, s)) + '</b> の所持チップを直す <small class="quiet">いま ' + v + (from != null ? '・申告 ' + from : '') + '</small></p>' +
+      '<div class="row"><input id="chipfix" class="num" inputmode="numeric" pattern="[0-9]*" autocomplete="off" value="' + esc(GUI.chipVal) + '" aria-label="' + s + '席の所持チップ">' +
+      '<button class="btn btn-small btn-main" data-act="chipSave">保存</button><button class="btn btn-small" data-act="chipCancel">やめる</button></div></div>';
   }
   function judgeHtml(g) {
     const rd = g.rounds[g.round];
@@ -975,7 +1090,33 @@
     advance(el) { el.disabled = true; act.advance(); },
     closeNow() { act.closeNow(); },
     extend() { act.extend(); },
-    tab(el) { GUI.tab = el.dataset.v; render(true); },
+    tab(el) { GUI.tab = el.dataset.v; GUI.chipEdit = null; render(true); },
+    chipEdit(el) {
+      const s = el.dataset.seat;
+      const v = chipsNow(G(), s);
+      if (v == null) return;
+      GUI.chipEdit = s;
+      GUI.chipVal = String(v);
+      render(true);
+      const i = document.getElementById('chipfix');
+      if (i) { i.scrollIntoView({ block: 'nearest' }); i.focus(); i.select(); }
+    },
+    chipCancel() { GUI.chipEdit = null; render(true); },
+    async chipSave() {
+      const s = GUI.chipEdit;
+      if (!s) return;
+      const t = String(GUI.chipVal || '').trim();
+      const v = E.toInt(t);
+      if (!t || Number.isNaN(v)) { toast('所持チップを数字で入れてください'); return; }
+      if (v > 9999) { toast('所持チップが大きすぎます。確かめてください'); return; }
+      GUI.chipEdit = null;
+      const a = document.activeElement;
+      if (a && a.blur) a.blur();
+      render(true);
+      const res = await act.fixChips(s, v);
+      if (res === false) return;
+      toast(s + '席の所持チップを ' + v + ' にしました' + (res ? '。落札結果が変わりました。読み上げと払い出しを確かめてください' : ''));
+    },
     recode() { act.recode(); },
     fillCards() { act.fillCards(); },
     fillBids() { act.fillBids(); },
@@ -1054,7 +1195,14 @@
       render(true);
     },
     entryBack() { PUI.step = 'edit-again'; render(true); },
-    reedit() { PUI.step = 'edit-again'; render(true); },
+    reedit() {
+      const g = G();
+      const me = mySeat(g);
+      const e = g && me ? entryOf(g, g.round, me.seat) : null;
+      if (e) { PUI.pick = e.cards.slice(); PUI.chips = String(e.chips); }   // GMが直した値から始める
+      PUI.step = 'edit-again';
+      render(true);
+    },
     async entrySubmit(el) {
       const g = G();
       if (g.phase !== 'ENTRY') { toast('カード提出は締め切られました'); return; }
@@ -1103,6 +1251,7 @@
   app.addEventListener('input', (ev) => {
     const el = ev.target;
     if (el.id === 'chips') PUI.chips = el.value;
+    else if (el.id === 'chipfix') GUI.chipVal = el.value;
     else if (el.id === 'join-code') PUI.join = el.value;
     else if (el.dataset.item != null && PUI.bid && PUI.bid.items[+el.dataset.item]) { PUI.bid.items[+el.dataset.item][el.dataset.field] = el.value; updateBidTotal(); }
   });
@@ -1110,7 +1259,11 @@
     const el = ev.target;
     if (el.dataset.name) act.rename(el.dataset.name, el.value);
   });
-  app.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && ev.target.id === 'join-code') handlers.join(null); });
+  app.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' && ev.target.id === 'join-code') handlers.join(null);
+    else if (ev.target.id === 'chipfix' && ev.key === 'Enter') { ev.preventDefault(); handlers.chipSave(); }
+    else if (ev.target.id === 'chipfix' && ev.key === 'Escape') handlers.chipCancel();
+  });
   function updateBidTotal() {
     const g = G();
     const me = mySeat(g);
